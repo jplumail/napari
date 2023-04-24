@@ -16,7 +16,6 @@ from copy import deepcopy
 
 import numpy as np
 from packaging.version import parse as parse_version
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -25,10 +24,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from superqt.utils import qthrottled
 
 import napari
-from napari.components.layerlist import Extent
 from napari.components.viewer_model import ViewerModel
 from napari.layers import Image, Labels, Layer, Vectors
 from napari.qt import QtViewer
@@ -163,7 +160,7 @@ class CrossWidget(QCheckBox):
     the cross update is throttled
     """
 
-    def __init__(self, viewer: napari.Viewer) -> None:
+    def __init__(self, viewer: napari.Viewer, image_layer: Image) -> None:
         super().__init__("Add cross layer")
         self.viewer = viewer
         self.setChecked(False)
@@ -172,43 +169,17 @@ class CrossWidget(QCheckBox):
         self.viewer.dims.events.order.connect(self.update_cross)
         self.viewer.dims.events.ndim.connect(self._update_ndim)
         self.viewer.dims.events.current_step.connect(self.update_cross)
-        self._extent = None
+        self._extent = image_layer.extent
+        self.layer = Vectors(name=".cross", ndim=image_layer.ndim)
+        self.layer.edge_width = 0.5
 
-        self._update_extent()
-        self.viewer.dims.events.connect(self._update_extent)
-
-    @qthrottled(leading=False)
-    def _update_extent(self):
-        """
-        Calculate the extent of the data.
-
-        Ignores the the cross layer itself in calculating the extent.
-        """
-        if NAPARI_GE_4_16:
-            layers = [
-                layer
-                for layer in self.viewer.layers
-                if layer is not self.layer
-            ]
-            self._extent = self.viewer.layers.get_extent(layers)
-        else:
-            extent_list = [
-                layer.extent
-                for layer in self.viewer.layers
-                if layer is not self.layer
-            ]
-            self._extent = Extent(
-                data=None,
-                world=self.viewer.layers._get_extent_world(extent_list),
-                step=self.viewer.layers._get_step_size(extent_list),
-            )
-        self.update_cross()
+        self.viewer.dims.events.connect(self.update_cross)
 
     def _update_ndim(self, event):
         if self.layer in self.viewer.layers:
             self.viewer.layers.remove(self.layer)
         self.layer = Vectors(name=".cross", ndim=event.value)
-        self.layer.edge_width = 1.5
+        self.layer.edge_width = 0.5
         self.update_cross()
 
     def _update_cross_visibility(self, state):
@@ -257,23 +228,14 @@ class ExampleWidget(QWidget):
 
 
 class MultipleViewerWidget(QSplitter):
-    """The main widget of the example."""
-
-    def __init__(self, viewer: napari.Viewer) -> None:
+    def __init__(self, viewer: napari.Viewer, dim: int) -> None:
         super().__init__()
         self.viewer = viewer
-        self.viewer_model1 = ViewerModel(title="model1")
-        self.viewer_model2 = ViewerModel(title="model2")
+        self.dim = dim
+        self.viewer_model = ViewerModel(title="model")
         self._block = False
-        self.qt_viewer1 = QtViewerWrap(viewer, self.viewer_model1)
-        self.qt_viewer2 = QtViewerWrap(viewer, self.viewer_model2)
-        viewer_splitter = QSplitter()
-        viewer_splitter.setOrientation(Qt.Vertical)
-        viewer_splitter.addWidget(self.qt_viewer1)
-        viewer_splitter.addWidget(self.qt_viewer2)
-        viewer_splitter.setContentsMargins(0, 0, 0, 0)
-
-        self.addWidget(viewer_splitter)
+        self.qt_viewer = QtViewerWrap(viewer, self.viewer_model)
+        self.addWidget(self.qt_viewer)
 
         self.viewer.layers.events.inserted.connect(self._layer_added)
         self.viewer.layers.events.removed.connect(self._layer_removed)
@@ -282,19 +244,16 @@ class MultipleViewerWidget(QSplitter):
             self._layer_selection_changed
         )
         self.viewer.dims.events.current_step.connect(self._point_update)
-        self.viewer_model1.dims.events.current_step.connect(self._point_update)
-        self.viewer_model2.dims.events.current_step.connect(self._point_update)
+        self.viewer_model.dims.events.current_step.connect(self._point_update)
         self.viewer.dims.events.order.connect(self._order_update)
         self.viewer.events.reset_view.connect(self._reset_view)
-        self.viewer_model1.events.status.connect(self._status_update)
-        self.viewer_model2.events.status.connect(self._status_update)
+        self.viewer_model.events.status.connect(self._status_update)
 
     def _status_update(self, event):
         self.viewer.status = event.value
 
     def _reset_view(self):
-        self.viewer_model1.reset_view()
-        self.viewer_model2.reset_view()
+        self.viewer_model.reset_view()
 
     def _layer_selection_changed(self, event):
         """
@@ -304,19 +263,15 @@ class MultipleViewerWidget(QSplitter):
             return
 
         if event.value is None:
-            self.viewer_model1.layers.selection.active = None
-            self.viewer_model2.layers.selection.active = None
+            self.viewer_model.layers.selection.active = None
             return
 
-        self.viewer_model1.layers.selection.active = self.viewer_model1.layers[
-            event.value.name
-        ]
-        self.viewer_model2.layers.selection.active = self.viewer_model2.layers[
+        self.viewer_model.layers.selection.active = self.viewer_model.layers[
             event.value.name
         ]
 
     def _point_update(self, event):
-        for model in [self.viewer, self.viewer_model1, self.viewer_model2]:
+        for model in [self.viewer, self.viewer_model]:
             if model.dims is event.source:
                 continue
             model.dims.current_step = event.value
@@ -324,23 +279,19 @@ class MultipleViewerWidget(QSplitter):
     def _order_update(self):
         order = list(self.viewer.dims.order)
         if len(order) <= 2:
-            self.viewer_model1.dims.order = order
-            self.viewer_model2.dims.order = order
+            self.viewer_model.dims.order = order
             return
 
-        order[-3:] = order[-2], order[-3], order[-1]
-        self.viewer_model1.dims.order = order
-        order = list(self.viewer.dims.order)
-        order[-3:] = order[-1], order[-2], order[-3]
-        self.viewer_model2.dims.order = order
+        if self.dim == 1:
+            order[-3:] = order[-2], order[-3], order[-1]
+        elif self.dim == 2:
+            order[-3:] = order[-1], order[-2], order[-3]
+        self.viewer_model.dims.order = order
 
     def _layer_added(self, event):
         """add layer to additional viewers and connect all required events"""
-        self.viewer_model1.layers.insert(
-            event.index, copy_layer(event.value, "model1")
-        )
-        self.viewer_model2.layers.insert(
-            event.index, copy_layer(event.value, "model2")
+        self.viewer_model.layers.insert(
+            event.index, copy_layer(event.value, "model")
         )
         for name in get_property_names(event.value):
             getattr(event.value.events, name).connect(
@@ -349,17 +300,11 @@ class MultipleViewerWidget(QSplitter):
 
         if isinstance(event.value, Labels):
             event.value.events.set_data.connect(self._set_data_refresh)
-            self.viewer_model1.layers[
-                event.value.name
-            ].events.set_data.connect(self._set_data_refresh)
-            self.viewer_model2.layers[
+            self.viewer_model.layers[
                 event.value.name
             ].events.set_data.connect(self._set_data_refresh)
         if event.value.name != ".cross":
-            self.viewer_model1.layers[event.value.name].events.data.connect(
-                self._sync_data
-            )
-            self.viewer_model2.layers[event.value.name].events.data.connect(
+            self.viewer_model.layers[event.value.name].events.data.connect(
                 self._sync_data
             )
 
@@ -370,14 +315,13 @@ class MultipleViewerWidget(QSplitter):
     def _sync_name(self, event):
         """sync name of layers"""
         index = self.viewer.layers.index(event.source)
-        self.viewer_model1.layers[index].name = event.source.name
-        self.viewer_model2.layers[index].name = event.source.name
+        self.viewer_model.layers[index].name = event.source.name
 
     def _sync_data(self, event):
         """sync data modification from additional viewers"""
         if self._block:
             return
-        for model in [self.viewer, self.viewer_model1, self.viewer_model2]:
+        for model in [self.viewer, self.viewer_model]:
             layer = model.layers[event.source.name]
             if layer is event.source:
                 continue
@@ -393,7 +337,7 @@ class MultipleViewerWidget(QSplitter):
         """
         if self._block:
             return
-        for model in [self.viewer, self.viewer_model1, self.viewer_model2]:
+        for model in [self.viewer, self.viewer_model]:
             layer = model.layers[event.source.name]
             if layer is event.source:
                 continue
@@ -405,8 +349,7 @@ class MultipleViewerWidget(QSplitter):
 
     def _layer_removed(self, event):
         """remove layer in all viewers"""
-        self.viewer_model1.layers.pop(event.index)
-        self.viewer_model2.layers.pop(event.index)
+        self.viewer_model.layers.pop(event.index)
 
     def _layer_moved(self, event):
         """update order of layers"""
@@ -415,8 +358,7 @@ class MultipleViewerWidget(QSplitter):
             if event.new_index < event.index
             else event.new_index + 1
         )
-        self.viewer_model1.layers.move(event.index, dest_index)
-        self.viewer_model2.layers.move(event.index, dest_index)
+        self.viewer_model.layers.move(event.index, dest_index)
 
     def _property_sync(self, name, event):
         """Sync layers properties (except the name)"""
@@ -425,12 +367,7 @@ class MultipleViewerWidget(QSplitter):
         try:
             self._block = True
             setattr(
-                self.viewer_model1.layers[event.source.name],
-                name,
-                getattr(event.source, name),
-            )
-            setattr(
-                self.viewer_model2.layers[event.source.name],
+                self.viewer_model.layers[event.source.name],
                 name,
                 getattr(event.source, name),
             )
@@ -439,33 +376,40 @@ class MultipleViewerWidget(QSplitter):
 
 
 if __name__ == "__main__":
-    from skimage.data import cells3d
-    im = cells3d()
+    import tifffile
+    #im = cells3d()
+    im = tifffile.imread("/home/plumail/Téléchargements/1.tif")
 
     from qtpy import QtCore, QtWidgets
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
     # above two lines are needed to allow to undock the widget with
     # additional viewers
     view = napari.Viewer()
-    dock_widget = MultipleViewerWidget(view)
-    cross = CrossWidget(view)
+    dock_widget1 = MultipleViewerWidget(view, dim=1)
+    dock_widget2 = MultipleViewerWidget(view, dim=2)
 
-    view.window.add_dock_widget(dock_widget, name="Sample")
+    view.window.add_dock_widget(dock_widget1, name="Sample1", area="bottom")
+    view.window.add_dock_widget(dock_widget2, name="Sample2", area="right")
+
+    #image_layer = view.add_image(
+    #    im,
+    #    channel_axis=1,
+    #    name=["membrane", "nuclei"],
+    #    colormap=["green", "magenta"],
+    #    contrast_limits=[[1000, 20000], [1000, 50000]],
+    #)
+
+    image_layer = view.add_image(im)
+
+    cross = CrossWidget(view, image_layer)
     view.window.add_dock_widget(cross, name="Cross", area="left")
-
-    view.add_image(
-        im,
-        channel_axis=1,
-        name=["membrane", "nuclei"],
-        colormap=["green", "magenta"],
-        contrast_limits=[[1000, 20000], [1000, 50000]],
-    )
 
     points_layer = napari.layers.Points(
         ndim=3,
         edge_color=[0,0,255,255],
         face_color=[0,0,0,0],
-        out_of_slice_display=True
+        out_of_slice_display=True,
+        size=10
     )
     view.add_layer(points_layer)
 
