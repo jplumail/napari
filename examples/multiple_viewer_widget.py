@@ -22,7 +22,6 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QPushButton,
     QSplitter,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -268,11 +267,6 @@ class MultipleViewerWidget(QSplitter):
         self._block = False
         self.qt_viewer1 = QtViewerWrap(viewer, self.viewer_model1)
         self.qt_viewer2 = QtViewerWrap(viewer, self.viewer_model2)
-        self.tab_widget = QTabWidget()
-        w1 = ExampleWidget()
-        w2 = ExampleWidget()
-        self.tab_widget.addTab(w1, "Sample 1")
-        self.tab_widget.addTab(w2, "Sample 2")
         viewer_splitter = QSplitter()
         viewer_splitter.setOrientation(Qt.Vertical)
         viewer_splitter.addWidget(self.qt_viewer1)
@@ -280,7 +274,6 @@ class MultipleViewerWidget(QSplitter):
         viewer_splitter.setContentsMargins(0, 0, 0, 0)
 
         self.addWidget(viewer_splitter)
-        self.addWidget(self.tab_widget)
 
         self.viewer.layers.events.inserted.connect(self._layer_added)
         self.viewer.layers.events.removed.connect(self._layer_removed)
@@ -446,6 +439,9 @@ class MultipleViewerWidget(QSplitter):
 
 
 if __name__ == "__main__":
+    from skimage.data import cells3d
+    im = cells3d()
+
     from qtpy import QtCore, QtWidgets
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
     # above two lines are needed to allow to undock the widget with
@@ -456,5 +452,21 @@ if __name__ == "__main__":
 
     view.window.add_dock_widget(dock_widget, name="Sample")
     view.window.add_dock_widget(cross, name="Cross", area="left")
+
+    view.add_image(
+        im,
+        channel_axis=1,
+        name=["membrane", "nuclei"],
+        colormap=["green", "magenta"],
+        contrast_limits=[[1000, 20000], [1000, 50000]],
+    )
+
+    points_layer = napari.layers.Points(
+        ndim=3,
+        edge_color=[0,0,255,255],
+        face_color=[0,0,0,0],
+        out_of_slice_display=True
+    )
+    view.add_layer(points_layer)
 
     napari.run()
